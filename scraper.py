@@ -37,10 +37,23 @@ class MedofastScraper:
 
     async def wait_for_question_load(self):
         try:
-            await self.page.wait_for_selector("#questionSkeletonLoader", state="hidden", timeout=8000)
+            # Wait for the loader to disappear
+            await self.page.wait_for_selector("#questionSkeletonLoader", state="hidden", timeout=10000)
         except:
             pass
+        # Additional wait for AJAX content to settle
         await asyncio.sleep(self.question_load_delay)
+
+    async def get_question_number_from_page(self):
+        try:
+            h6_text = await self.page.text_content("h6")
+            if h6_text:
+                m = re.search(r'سوال\s*(\d+)', h6_text)
+                if m:
+                    return int(m.group(1))
+        except:
+            pass
+        return None
 
     async def extract_current_question(self, question_number):
         result = {}
@@ -117,24 +130,31 @@ class MedofastScraper:
             options.append({"number": i, "text": text.strip()})
 
         if not any(o["text"] for o in options):
-            encoded_attrs = await self.page.eval_on_selector_all(
-                ".encoded-option",
-                "els => els.map(e => e.getAttribute('data-encoded-text'))"
-            )
-            options = []
-            for i, enc in enumerate(encoded_attrs, start=1):
-                text = ""
-                if enc:
-                    try:
-                        text = base64.b64decode(enc).decode("utf-8")
-                    except:
-                        text = enc
-                options.append({"number": i, "text": text})
+            try:
+                encoded_attrs = await self.page.eval_on_selector_all(
+                    ".encoded-option",
+                    "els => els.map(e => e.getAttribute('data-encoded-text'))"
+                )
+                options = []
+                for i, enc in enumerate(encoded_attrs, start=1):
+                    text = ""
+                    if enc:
+                        try:
+                            text = base64.b64decode(enc).decode("utf-8")
+                        except:
+                            text = enc
+                    options.append({"number": i, "text": text})
+            except:
+                pass
 
         result["options"] = options
-        await asyncio.sleep(self.click_delay)
 
-        # Select option 1 and click confirm
+        # ── Identify correct option BEFORE clicking (if possible) ──
+        # Sometimes it's already there in progress bars or other elements
+        correct_option = None
+
+        # ── Click option 1 and Confirm ──
+        self.log("     Submitting answer to reveal correct option...")
         try:
             await self.page.eval_on_selector(
                 'input[type="radio"][value="1"]',
@@ -143,12 +163,8 @@ class MedofastScraper:
             radio = await self.page.query_selector('input[type="radio"][value="1"]')
             if radio:
                 await radio.click(force=True)
-        except:
-            pass
+            await asyncio.sleep(self.click_delay)
 
-        await asyncio.sleep(self.click_delay)
-
-        try:
             btn = await self.page.query_selector("#show-b-btn")
             if btn:
                 await self.page.evaluate("btn => btn.click()", btn)
@@ -159,14 +175,11 @@ class MedofastScraper:
 
         # Handle explanatory answers
         answer_text = ""
-        correct_option = None
 
         if self.skip_explanation:
-            result["correct_option"] = None
-            result["answer_explanation"] = ""
-            result["question_number"] = question_number
-            # We still might want to know the correct answer if it's available without waiting for block-b
+            self.log("     Skipping explanatory answer.")
         else:
+            self.log("     Waiting for explanatory answer...")
             try:
                 # Wait for block-b to appear and have content
                 await self.page.wait_for_function(
@@ -174,7 +187,7 @@ class MedofastScraper:
                         const block = document.getElementById('block-b');
                         if (!block) return false;
                         const text = block.innerText || '';
-                        return text.trim().length > 20;
+                        return text.trim().length > 10;
                     }""",
                     timeout=8000
                 )
@@ -194,12 +207,15 @@ class MedofastScraper:
                     except:
                         pass
 
-        # Identify correct option
+        # ── Identify correct option (Post-click) ──
+
+        # Method 1: From answer text
         if answer_text:
             m = re.search(r'تایید گزینه\s*(\d)', answer_text)
             if m:
                 correct_option = int(m.group(1))
 
+        # Method 2: Check labels for success/correct classes or colors
         if not correct_option:
             try:
                 for i in range(1, 5):
@@ -208,16 +224,19 @@ class MedofastScraper:
                         cls = await label.get_attribute("class") or ""
                         style = await label.get_attribute("style") or ""
                         bg = await self.page.evaluate(
-                            f"() => window.getComputedStyle(document.getElementById('label{i}')).backgroundColor"
+                            f"(id) => window.getComputedStyle(document.getElementById(id)).backgroundColor",
+                            f"label{i}"
                         )
+                        # Look for green colors (rgb(34, ...), etc.) or success classes
                         if ("success" in cls or "correct" in cls or
                                 "green" in style.lower() or
-                                "34" in bg):
+                                "34" in bg or "40, 167, 69" in bg):
                             correct_option = i
                             break
             except:
                 pass
 
+        # Method 3: From progress bars
         if not correct_option:
             try:
                 for i in range(1, 5):
@@ -230,21 +249,44 @@ class MedofastScraper:
             except:
                 pass
 
+        # Method 4: Highest percentage (as fallback)
+        if not correct_option:
+            try:
+                max_pct = -1
+                for i in range(1, 5):
+                    bar = await self.page.query_selector(f"#prograssBar{i}")
+                    if bar:
+                        enc = await bar.get_attribute("data-encoded-percent")
+                        if enc:
+                            try:
+                                pct_val = int(base64.b64decode(enc).decode())
+                                if pct_val > max_pct:
+                                    max_pct = pct_val
+                                    if pct_val > 50:
+                                        correct_option = i
+                            except:
+                                pass
+            except:
+                pass
+
         result["correct_option"] = correct_option
         result["answer_explanation"] = answer_text.strip() if not self.skip_explanation else ""
         result["question_number"] = question_number
 
-        await asyncio.sleep(self.click_delay)
         return result
 
     async def go_to_next(self, current_number, logged_in_mode):
         next_btn = await self.page.query_selector("button[data-nav-role='next']")
         if not next_btn:
+            self.log("     ⚠️ Next button not found.")
             return False
 
         cls = await next_btn.get_attribute("class") or ""
         if "turned-off" in cls:
+            self.log("     🏁 Reached the end (Next button turned off).")
             return False
+
+        self.log("     Navigating to next question...")
 
         if logged_in_mode:
             onclick = await next_btn.get_attribute("onclick") or ""
@@ -252,25 +294,25 @@ class MedofastScraper:
             if url_match:
                 nav_url = url_match.group(1)
                 full_url = f"https://medofast.ir{nav_url}" if nav_url.startswith("/") else nav_url
-                await self.page.goto(full_url, wait_until="networkidle", timeout=20000)
-                await self.wait_for_question_load()
-                return True
-
-            await self.page.evaluate("btn => btn.click()", next_btn)
-            await self.page.wait_for_load_state("networkidle", timeout=15000)
-            await self.wait_for_question_load()
-            return True
+                await self.page.goto(full_url, wait_until="networkidle", timeout=30000)
+            else:
+                await self.page.evaluate("btn => btn.click()", next_btn)
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=15000)
+                except:
+                    pass
         else:
-            next_page = current_number + 1
             await self.page.evaluate("btn => btn.click()", next_btn)
-            try:
-                await self.page.wait_for_function(
-                    f"() => document.querySelector('h6') && document.querySelector('h6').textContent.includes('سوال {next_page}')",
-                    timeout=8000
-                )
-            except:
-                await self.wait_for_question_load()
-            return True
+
+        await self.wait_for_question_load()
+
+        # Verify navigation
+        new_number = await self.get_question_number_from_page()
+        if new_number and new_number == current_number:
+            self.log("     ⚠️ Still on the same question. Navigation failed.")
+            return False
+
+        return True
 
     async def run(self, login_confirmed_event):
         async with async_playwright() as p:
@@ -286,7 +328,6 @@ class MedofastScraper:
 
             self.log(f"⏳ Waiting for you to login manually. Click 'Confirm Login' button in GUI when ready.")
 
-            # Wait for user to confirm login via GUI or for stop signal
             while not login_confirmed_event.is_set():
                 if self.is_stopped:
                     await self.browser.close()
@@ -319,20 +360,21 @@ class MedofastScraper:
                 self.log(f"📊 Total Questions: {total_questions}")
 
             all_questions = []
-            question_number = 1
             consecutive_failures = 0
+
+            # Start from actual question number on page
+            question_number = await self.get_question_number_from_page() or 1
 
             while not self.is_stopped:
                 await self.check_pause()
 
-                self.log(f"  ⏳ Question {question_number}" + (f" of {total_questions}" if total_questions else "") + " ...")
+                self.log(f"  ⏳ Extracting Question {question_number}" + (f" of {total_questions}" if total_questions else "") + " ...")
 
                 data = await self.extract_current_question(question_number)
                 correct = data.get("correct_option")
                 self.log(f"     Correct Option: {'Option ' + str(correct) if correct else '⚠️  Not Found'}")
                 all_questions.append(data)
 
-                # Save after each question
                 with open(self.output_path, 'w', encoding='utf-8') as f:
                     json.dump(all_questions, f, ensure_ascii=False, indent=2)
 
@@ -343,17 +385,23 @@ class MedofastScraper:
                 await self.check_pause()
                 success = await self.go_to_next(question_number, logged_in_mode)
                 if not success:
-                    await asyncio.sleep(2)
+                    # Retry once with longer delay
+                    await asyncio.sleep(3)
                     success = await self.go_to_next(question_number, logged_in_mode)
 
                 if not success:
                     consecutive_failures += 1
                     if consecutive_failures >= 2:
-                        self.log(f"✅ Finished - Next button not available (Question {question_number})")
+                        self.log(f"✅ Finished - Navigation failed twice (Question {question_number})")
                         break
                 else:
                     consecutive_failures = 0
-                    question_number += 1
+                    # Get new question number from page
+                    new_num = await self.get_question_number_from_page()
+                    if new_num:
+                        question_number = new_num
+                    else:
+                        question_number += 1
 
             await self.browser.close()
             found = sum(1 for q in all_questions if q.get("correct_option"))
@@ -371,4 +419,4 @@ class MedofastScraper:
 
     def stop(self):
         self.is_stopped = True
-        self.resume() # Make sure we're not stuck in a pause
+        self.resume()
