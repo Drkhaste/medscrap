@@ -286,12 +286,15 @@ class MedofastScraper:
 
             self.log(f"⏳ Waiting for you to login manually. Click 'Confirm Login' button in GUI when ready.")
 
-            # Wait for user to confirm login via GUI
-            while not await login_confirmed_event.wait():
+            # Wait for user to confirm login via GUI or for stop signal
+            while not login_confirmed_event.is_set():
                 if self.is_stopped:
                     await self.browser.close()
                     return
-                await asyncio.sleep(1)
+                try:
+                    await asyncio.wait_for(login_confirmed_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
 
             self.log("🌐 Going to questions page...")
             await self.page.goto(self.url, wait_until="networkidle", timeout=30000)
