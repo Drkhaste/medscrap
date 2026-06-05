@@ -42,7 +42,7 @@ class MedofastGUI:
 
         # Delays / Speed Control
         delay_frame = ttk.LabelFrame(main_frame, text="Speed & Delay Settings (seconds)", padding="10")
-        delay_frame.grid(row=2, column=0, columnspan=3, fill=tk.X, pady=10)
+        delay_frame.grid(row=2, column=0, columnspan=3, sticky=tk.EW, pady=10)
 
         # Click Delay
         ttk.Label(delay_frame, text="Click Delay:").grid(row=0, column=0, sticky=tk.W)
@@ -70,7 +70,7 @@ class MedofastGUI:
 
         # Options
         options_frame = ttk.Frame(main_frame)
-        options_frame.grid(row=3, column=0, columnspan=3, fill=tk.X, pady=5)
+        options_frame.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=5)
 
         self.skip_explanation_var = tk.BooleanVar(value=False)
         self.skip_explanation_check = ttk.Checkbutton(options_frame, text="Skip Explanatory Answers (Faster)", variable=self.skip_explanation_var, command=self.update_skip_explanation)
