@@ -177,7 +177,7 @@ class MedofastScraper:
 
         result["options"] = options
 
-        # ── Submit answer to reveal correct one ──
+        # ── Submit answer ──
         self.log("     Submitting answer...")
         try:
             await self.page.evaluate("""() => {
@@ -202,11 +202,16 @@ class MedofastScraper:
 
         # Handle explanatory answers
         answer_text = ""
+        explanation_images = []
 
         if self.skip_explanation:
-            self.log("     Skipping explanation.")
-            # Still wait a bit for potential AJAX answer reveal in UI
-            await asyncio.sleep(2)
+            self.log("     Skipping explanation wait.")
+            # Quick check if it already appeared
+            try:
+                block = await self.page.query_selector("#block-b")
+                if block and await block.is_visible():
+                    answer_text = await block.inner_text()
+            except: pass
         else:
             self.log("     Waiting for explanation...")
             try:
@@ -222,6 +227,13 @@ class MedofastScraper:
                 block = await self.page.query_selector("#block-b")
                 if block:
                     answer_text = await block.inner_text()
+                    # Also extract images from explanation
+                    for img in await block.query_selector_all("img"):
+                        src = await img.get_attribute("src")
+                        alt = await img.get_attribute("alt") or ""
+                        if src:
+                            local_path = await self.download_image(src)
+                            explanation_images.append({"src": src, "alt": alt, "local_path": local_path})
             except:
                 for _ in range(5):
                     await asyncio.sleep(self.answer_load_delay)
@@ -240,7 +252,6 @@ class MedofastScraper:
 
         # Method 1: Text-based (Arabic/Persian digits support)
         if answer_text:
-            # Normalize digits
             norm_text = answer_text.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789'))
             patterns = [
                 r'پاسخ صحیح[:\s]*گزینه\s*(\d)',
@@ -253,15 +264,13 @@ class MedofastScraper:
                 if matches:
                     correct_options.extend([int(m) for m in matches])
 
-        # Method 2: Comprehensive Visual DOM Inspection
+        # Method 2: Comprehensive Visual DOM Inspection (Green and Blue)
         try:
             visual_results = await self.page.evaluate("""() => {
                 const results = [];
                 for (let i = 1; i <= 4; i++) {
                     const label = document.getElementById('label' + i);
                     const bar = document.getElementById('prograssBar' + i);
-                    let isCorrect = false;
-                    let reason = "";
 
                     const checkElement = (el) => {
                         if (!el) return false;
@@ -270,18 +279,26 @@ class MedofastScraper:
                         const rgb = bg.match(/\\d+/g);
                         if (rgb && rgb.length >= 3) {
                             const r = parseInt(rgb[0]), g = parseInt(rgb[1]), b = parseInt(rgb[2]);
-                            // Detect Green: G is dominant and reasonably high
-                            if (g > r + 30 && g > b + 30 && g > 100) return "green_bg";
+
+                            // Detect Green: G is dominant
+                            if (g > r + 30 && g > b + 30 && g > 100) return true;
+
+                            // Detect Blue (Medofast uses blue for correct answer in some views)
+                            // Blue: B is dominant
+                            if (b > r + 30 && b > g + 30 && b > 100) return true;
                         }
-                        if (el.className.includes('success') || el.className.includes('correct')) return "success_class";
-                        if (el.querySelector('.fa-check, .fa-check-circle, .text-success, .tick')) return "check_icon";
+
+                        if (el.className.includes('success') || el.className.includes('correct') || el.className.includes('primary')) {
+                             // But not 'danger' or 'error'
+                             if (!el.className.includes('danger') && !el.className.includes('error')) return true;
+                        }
+
+                        if (el.querySelector('.fa-check, .fa-check-circle, .text-success, .text-primary, .tick')) return true;
+
                         return false;
                     };
 
-                    const labelReason = checkElement(label);
-                    const barReason = checkElement(bar);
-
-                    if (labelReason || barReason) {
+                    if (checkElement(label) || checkElement(bar)) {
                         results.push(i);
                     }
                 }
@@ -297,22 +314,23 @@ class MedofastScraper:
 
         # ── Debugging/Fallback if still failed ──
         if not correct_options:
-            self.log(f"     ⚠️ No answer detected. Trying fallback to any green element...")
+            self.log(f"     ⚠️ No answer detected. Trying final fallback...")
             try:
-                # Find ANY element with 'success' or 'correct' in class that contains a number
                 any_correct = await self.page.evaluate("""() => {
-                    const all = document.querySelectorAll('.success, .correct, [class*="success"], [class*="correct"]');
                     const found = [];
-                    all.forEach(el => {
-                        const text = el.innerText || '';
-                        const m = text.match(/[1-4]/);
-                        if (m) found.push(parseInt(m[0]));
-                        // Check parent labels too
-                        const label = el.closest('label');
-                        if (label && label.id && label.id.startsWith('label')) {
-                            found.push(parseInt(label.id.replace('label', '')));
+                    // Look for progress bars that are NOT red
+                    for (let i = 1; i <= 4; i++) {
+                        const bar = document.getElementById('prograssBar' + i);
+                        if (bar) {
+                            const bg = window.getComputedStyle(bar).backgroundColor;
+                            const rgb = bg.match(/\\d+/g);
+                            if (rgb && rgb.length >= 3) {
+                                const r = parseInt(rgb[0]), g = parseInt(rgb[1]), b = parseInt(rgb[2]);
+                                // If it's more blue or green than red, it might be the one
+                                if ((b > r || g > r) && (b > 100 || g > 100)) found.push(i);
+                            }
                         }
-                    });
+                    }
                     return found;
                 }""")
                 if any_correct:
@@ -327,6 +345,7 @@ class MedofastScraper:
 
         result["correct_options"] = correct_options
         result["answer_explanation"] = answer_text.strip() if not self.skip_explanation else ""
+        result["explanation_images"] = explanation_images
         result["question_number"] = question_number
 
         return result
