@@ -177,7 +177,7 @@ class MedofastGUI:
                 "Exam", "Date", "Lesson", "Subject", "Difficulty", "Success Rate", "Position",
                 "Question Text",
                 "Option 1", "Option 2", "Option 3", "Option 4",
-                "Correct Option", "Explanation"
+                "Correct Options", "Explanation"
             ]
 
             with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
@@ -195,6 +195,12 @@ class MedofastGUI:
                         if 0 <= idx < 4:
                             opt_texts[idx] = o.get("text", "")
 
+                    corrects = q.get("correct_options", [])
+                    if not corrects and q.get("correct_option"):
+                        corrects = [q.get("correct_option")]
+
+                    corrects_str = ", ".join(map(str, corrects))
+
                     row = [
                         q.get("question_number", ""),
                         meta.get("آزمون", ""),
@@ -209,7 +215,7 @@ class MedofastGUI:
                         opt_texts[1],
                         opt_texts[2],
                         opt_texts[3],
-                        q.get("correct_option", ""),
+                        corrects_str,
                         q.get("answer_explanation", "")
                     ]
                     writer.writerow(row)

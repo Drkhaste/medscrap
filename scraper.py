@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import re
+import os
+import aiohttp
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -11,20 +13,20 @@ class MedofastScraper:
         self.is_paused = False
         self.is_stopped = False
         self.pause_event = asyncio.Event()
-        self.pause_event.set()  # Start in unpaused state
+        self.pause_event.set()
 
         # Settings
         self.url = ""
         self.output_path = "questions.json"
-        self.click_delay = 1.0
-        self.question_load_delay = 2.0
-        self.answer_load_delay = 1.0
+        self.click_delay = 2.0
+        self.question_load_delay = 3.0
+        self.answer_load_delay = 2.0
         self.skip_explanation = False
-        self.login_wait = 60
 
         self.browser = None
         self.context = None
         self.page = None
+        self.image_dir = Path("downloaded_images")
 
     def log(self, message):
         if self.logger:
@@ -37,12 +39,42 @@ class MedofastScraper:
 
     async def wait_for_question_load(self):
         try:
-            # Wait for the loader to disappear
-            await self.page.wait_for_selector("#questionSkeletonLoader", state="hidden", timeout=10000)
+            await self.page.wait_for_selector("#questionSkeletonLoader", state="hidden", timeout=15000)
         except:
             pass
-        # Additional wait for AJAX content to settle
+        # Hard delay to ensure site stabilizes after skeleton disappears
         await asyncio.sleep(self.question_load_delay)
+
+    async def download_image(self, url):
+        if not url: return None
+
+        # Handle relative URLs
+        if url.startswith("/"):
+            url = f"https://medofast.ir{url}"
+
+        try:
+            self.image_dir.mkdir(exist_ok=True)
+            # Create a safe filename
+            filename = re.sub(r'[^\w\-_\. ]', '_', url.split("/")[-1])
+            if not filename or len(filename) < 5:
+                filename = f"img_{hash(url)}.png"
+
+            filepath = self.image_dir / filename
+
+            # If we already have it, don't download again
+            if filepath.exists():
+                return str(filepath)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        with open(filepath, "wb") as f:
+                            f.write(content)
+                        return str(filepath)
+        except Exception as e:
+            self.log(f"     ⚠️ Image download failed ({url}): {str(e)}")
+        return url
 
     async def get_question_number_from_page(self):
         try:
@@ -97,14 +129,18 @@ class MedofastScraper:
             q_elem = await self.page.query_selector("#qtxt")
             if q_elem:
                 question_text = await q_elem.inner_text()
+                # Find all images in the question content
                 for img in await q_elem.query_selector_all("img"):
                     src = await img.get_attribute("src")
                     alt = await img.get_attribute("alt") or ""
                     if src:
-                        question_images.append({"src": src, "alt": alt})
+                        self.log(f"     Found image: {src[:50]}...")
+                        local_path = await self.download_image(src)
+                        question_images.append({"src": src, "alt": alt, "local_path": local_path})
         except:
             pass
 
+        # Handle secondary question container if primary is empty
         if not question_text.strip():
             try:
                 q_elem = await self.page.query_selector(".qtext-before")
@@ -149,11 +185,8 @@ class MedofastScraper:
 
         result["options"] = options
 
-        # ── Identify correct option BEFORE clicking (if possible) ──
-        correct_option = None
-
-        # ── Click option 1 and Confirm ──
-        self.log("     Submitting answer to reveal correct option...")
+        # ── Submit answer ──
+        self.log("     Submitting answer...")
         try:
             await self.page.eval_on_selector(
                 'input[type="radio"][value="1"]',
@@ -176,11 +209,10 @@ class MedofastScraper:
         answer_text = ""
 
         if self.skip_explanation:
-            self.log("     Skipping explanatory answer.")
+            self.log("     Skipping explanation.")
         else:
-            self.log("     Waiting for explanatory answer...")
+            self.log("     Waiting for explanation...")
             try:
-                # Wait for block-b to appear and have content
                 await self.page.wait_for_function(
                     """() => {
                         const block = document.getElementById('block-b');
@@ -188,13 +220,13 @@ class MedofastScraper:
                         const text = block.innerText || '';
                         return text.trim().length > 10;
                     }""",
-                    timeout=8000
+                    timeout=10000
                 )
                 block = await self.page.query_selector("#block-b")
                 if block:
                     answer_text = await block.inner_text()
             except:
-                for _ in range(5):
+                for _ in range(3):
                     await asyncio.sleep(self.answer_load_delay)
                     try:
                         block = await self.page.query_selector("#block-b")
@@ -206,69 +238,53 @@ class MedofastScraper:
                     except:
                         pass
 
-        # ── Identify correct option (Post-click) ──
+        # ── Identify correct options (Now supporting multiple) ──
+        correct_options = []
 
-        # Method 1: From answer text
+        # Method 1: From answer text (e.g., "تایید گزینه 3", "تایید گزینه 4")
         if answer_text:
-            m = re.search(r'تایید گزینه\s*(\d)', answer_text)
-            if m:
-                correct_option = int(m.group(1))
+            matches = re.findall(r'تایید گزینه\s*(\d)', answer_text)
+            if matches:
+                correct_options.extend([int(m) for m in matches])
 
-        # Method 2: Check labels for success/correct classes or colors
-        if not correct_option:
-            try:
-                for i in range(1, 5):
-                    label = await self.page.query_selector(f"#label{i}")
-                    if label:
-                        cls = await label.get_attribute("class") or ""
-                        style = await label.get_attribute("style") or ""
-                        bg = await self.page.evaluate(
-                            f"(id) => window.getComputedStyle(document.getElementById(id)).backgroundColor",
-                            f"label{i}"
-                        )
-                        # Look for green colors (rgb(34, ...), etc.) or success classes
-                        if ("success" in cls or "correct" in cls or
-                                "green" in style.lower() or
-                                "34" in bg or "40, 167, 69" in bg):
-                            correct_option = i
-                            break
-            except:
-                pass
+        # Method 2: Labels
+        try:
+            for i in range(1, 5):
+                label = await self.page.query_selector(f"#label{i}")
+                if label:
+                    cls = await label.get_attribute("class") or ""
+                    style = await label.get_attribute("style") or ""
+                    bg = await self.page.evaluate(
+                        """(id) => {
+                            const el = document.getElementById(id);
+                            return el ? window.getComputedStyle(el).backgroundColor : '';
+                        }""",
+                        f"label{i}"
+                    )
+                    if ("success" in cls or "correct" in cls or
+                            "green" in style.lower() or
+                            "34" in bg or "40, 167, 69" in bg):
+                        if i not in correct_options:
+                            correct_options.append(i)
+        except:
+            pass
 
-        # Method 3: From progress bars
-        if not correct_option:
-            try:
-                for i in range(1, 5):
-                    bar = await self.page.query_selector(f"#prograssBar{i}")
-                    if bar:
-                        cls = await bar.get_attribute("class") or ""
-                        if "bg-success" in cls:
-                            correct_option = i
-                            break
-            except:
-                pass
+        # Method 3: Progress bars
+        try:
+            for i in range(1, 5):
+                bar = await self.page.query_selector(f"#prograssBar{i}")
+                if bar:
+                    cls = await bar.get_attribute("class") or ""
+                    if "bg-success" in cls:
+                        if i not in correct_options:
+                            correct_options.append(i)
+        except:
+            pass
 
-        # Method 4: Highest percentage (as fallback)
-        if not correct_option:
-            try:
-                max_pct = -1
-                for i in range(1, 5):
-                    bar = await self.page.query_selector(f"#prograssBar{i}")
-                    if bar:
-                        enc = await bar.get_attribute("data-encoded-percent")
-                        if enc:
-                            try:
-                                pct_val = int(base64.b64decode(enc).decode())
-                                if pct_val > max_pct:
-                                    max_pct = pct_val
-                                    if pct_val > 50:
-                                        correct_option = i
-                            except:
-                                pass
-            except:
-                pass
+        # De-duplicate and sort
+        correct_options = sorted(list(set(correct_options)))
 
-        result["correct_option"] = correct_option
+        result["correct_options"] = correct_options
         result["answer_explanation"] = answer_text.strip() if not self.skip_explanation else ""
         result["question_number"] = question_number
 
@@ -277,17 +293,13 @@ class MedofastScraper:
     async def go_to_next(self, current_number, logged_in_mode):
         next_btn = await self.page.query_selector("button[data-nav-role='next']")
         if not next_btn:
-            self.log("     ⚠️ Next button not found.")
             return False
 
         cls = await next_btn.get_attribute("class") or ""
         if "turned-off" in cls:
-            self.log("     🏁 Reached the end (Next button turned off).")
             return False
 
-        self.log(f"     Navigating to next question (after {current_number})...")
-
-        # Site is AJAX-heavy, add delay before clicking
+        self.log(f"     Moving to next (from {current_number})...")
         await asyncio.sleep(self.click_delay)
 
         try:
@@ -301,16 +313,12 @@ class MedofastScraper:
                 else:
                     await next_btn.click(force=True)
             else:
-                # Guest mode often uses AJAX to replace content
                 await next_btn.click(force=True)
-        except Exception as e:
-            self.log(f"     ⚠️ Click failed: {str(e)}. Retrying with script...")
+        except:
             await self.page.evaluate("btn => btn.click()", next_btn)
 
-        # Wait for either URL change or DOM update
         await self.wait_for_question_load()
 
-        # Specific wait for question number to change in the UI
         try:
             await self.page.wait_for_function(
                 """(oldNum) => {
@@ -321,19 +329,16 @@ class MedofastScraper:
                     return m && parseInt(m[1]) !== oldNum;
                 }""",
                 current_number,
-                timeout=10000
+                timeout=12000
             )
         except:
             pass
 
-        # Verify navigation
         new_number = await self.get_question_number_from_page()
         if new_number is not None and new_number == current_number:
-            self.log(f"     ⚠️ Still on question {current_number}. Navigation failed.")
+            self.log(f"     ⚠️ Still on {current_number}. Navigation failed.")
             return False
 
-        if new_number:
-            self.log(f"     Successfully moved to question {new_number}.")
         return True
 
     async def run(self, login_confirmed_event):
@@ -348,8 +353,7 @@ class MedofastScraper:
             self.log("🌐 Opening login page...")
             await self.page.goto("https://medofast.ir/login", wait_until="networkidle", timeout=30000)
 
-            self.log(f"⏳ Waiting for you to login manually. Click 'Confirm Login' button in GUI when ready.")
-
+            self.log(f"⏳ Waiting for login confirmation...")
             while not login_confirmed_event.is_set():
                 if self.is_stopped:
                     await self.browser.close()
@@ -359,14 +363,13 @@ class MedofastScraper:
                 except asyncio.TimeoutError:
                     pass
 
-            self.log("🌐 Going to questions page...")
+            self.log("🌐 Navigating to URL...")
             await self.page.goto(self.url, wait_until="networkidle", timeout=30000)
             await self.wait_for_question_load()
 
             logged_in_mode = await self.page.evaluate(
                 "() => document.body.getAttribute('data-user-authenticated') === 'true'"
             )
-            self.log(f"🔑 Mode: {'Logged In ✅' if logged_in_mode else 'Guest'}")
 
             total_questions = None
             try:
@@ -379,46 +382,42 @@ class MedofastScraper:
                 pass
 
             if total_questions:
-                self.log(f"📊 Total Questions: {total_questions}")
+                self.log(f"📊 Total: {total_questions}")
 
             all_questions = []
             consecutive_failures = 0
-
-            # Start from actual question number on page
             question_number = await self.get_question_number_from_page() or 1
 
             while not self.is_stopped:
                 await self.check_pause()
 
-                self.log(f"  ⏳ Extracting Question {question_number}" + (f" of {total_questions}" if total_questions else "") + " ...")
+                self.log(f"  ⏳ Question {question_number}...")
 
                 data = await self.extract_current_question(question_number)
-                correct = data.get("correct_option")
-                self.log(f"     Correct Option: {'Option ' + str(correct) if correct else '⚠️  Not Found'}")
+                corrects = data.get("correct_options", [])
+                self.log(f"     Correct Options: {corrects if corrects else '⚠️ Not Found'}")
                 all_questions.append(data)
 
                 with open(self.output_path, 'w', encoding='utf-8') as f:
                     json.dump(all_questions, f, ensure_ascii=False, indent=2)
 
                 if total_questions and question_number >= total_questions:
-                    self.log("✅ Reached the last question")
+                    self.log("✅ Reached last question.")
                     break
 
                 await self.check_pause()
                 success = await self.go_to_next(question_number, logged_in_mode)
                 if not success:
-                    # Retry once with longer delay
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(4)
                     success = await self.go_to_next(question_number, logged_in_mode)
 
                 if not success:
                     consecutive_failures += 1
                     if consecutive_failures >= 2:
-                        self.log(f"✅ Finished - Navigation failed twice (Question {question_number})")
+                        self.log(f"✅ Finished - Navigation failed.")
                         break
                 else:
                     consecutive_failures = 0
-                    # Get new question number from page
                     new_num = await self.get_question_number_from_page()
                     if new_num:
                         question_number = new_num
@@ -426,10 +425,7 @@ class MedofastScraper:
                         question_number += 1
 
             await self.browser.close()
-            found = sum(1 for q in all_questions if q.get("correct_option"))
-            self.log(f"\n✅ Extraction complete: {len(all_questions)} questions")
-            self.log(f"🎯 Correct answers found: {found}/{len(all_questions)}")
-            self.log(f"💾 Saved to: {self.output_path}")
+            self.log(f"\n✅ Done: {len(all_questions)} questions.")
 
     def pause(self):
         self.is_paused = True
