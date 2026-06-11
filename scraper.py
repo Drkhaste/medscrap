@@ -150,7 +150,6 @@ class MedofastScraper:
         result["options"] = options
 
         # ── Identify correct option BEFORE clicking (if possible) ──
-        # Sometimes it's already there in progress bars or other elements
         correct_option = None
 
         # ── Click option 1 and Confirm ──
@@ -286,32 +285,55 @@ class MedofastScraper:
             self.log("     🏁 Reached the end (Next button turned off).")
             return False
 
-        self.log("     Navigating to next question...")
+        self.log(f"     Navigating to next question (after {current_number})...")
 
-        if logged_in_mode:
-            onclick = await next_btn.get_attribute("onclick") or ""
-            url_match = re.search(r"window\.location\.href='([^']+)'", onclick)
-            if url_match:
-                nav_url = url_match.group(1)
-                full_url = f"https://medofast.ir{nav_url}" if nav_url.startswith("/") else nav_url
-                await self.page.goto(full_url, wait_until="networkidle", timeout=30000)
+        # Site is AJAX-heavy, add delay before clicking
+        await asyncio.sleep(self.click_delay)
+
+        try:
+            if logged_in_mode:
+                onclick = await next_btn.get_attribute("onclick") or ""
+                url_match = re.search(r"window\.location\.href='([^']+)'", onclick)
+                if url_match:
+                    nav_url = url_match.group(1)
+                    full_url = f"https://medofast.ir{nav_url}" if nav_url.startswith("/") else nav_url
+                    await self.page.goto(full_url, wait_until="networkidle", timeout=30000)
+                else:
+                    await next_btn.click(force=True)
             else:
-                await self.page.evaluate("btn => btn.click()", next_btn)
-                try:
-                    await self.page.wait_for_load_state("networkidle", timeout=15000)
-                except:
-                    pass
-        else:
+                # Guest mode often uses AJAX to replace content
+                await next_btn.click(force=True)
+        except Exception as e:
+            self.log(f"     ⚠️ Click failed: {str(e)}. Retrying with script...")
             await self.page.evaluate("btn => btn.click()", next_btn)
 
+        # Wait for either URL change or DOM update
         await self.wait_for_question_load()
+
+        # Specific wait for question number to change in the UI
+        try:
+            await self.page.wait_for_function(
+                """(oldNum) => {
+                    const h6 = document.querySelector('h6');
+                    if (!h6) return false;
+                    const text = h6.innerText || '';
+                    const m = text.match(/سوال\\s*(\\d+)/);
+                    return m && parseInt(m[1]) !== oldNum;
+                }""",
+                current_number,
+                timeout=10000
+            )
+        except:
+            pass
 
         # Verify navigation
         new_number = await self.get_question_number_from_page()
-        if new_number and new_number == current_number:
-            self.log("     ⚠️ Still on the same question. Navigation failed.")
+        if new_number is not None and new_number == current_number:
+            self.log(f"     ⚠️ Still on question {current_number}. Navigation failed.")
             return False
 
+        if new_number:
+            self.log(f"     Successfully moved to question {new_number}.")
         return True
 
     async def run(self, login_confirmed_event):
