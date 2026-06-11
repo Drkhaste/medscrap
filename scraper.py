@@ -27,6 +27,7 @@ class MedofastScraper:
         self.context = None
         self.page = None
         self.image_dir = Path("downloaded_images")
+        self.debug_dir = Path("debug_screenshots")
 
     def log(self, message):
         if self.logger:
@@ -176,10 +177,9 @@ class MedofastScraper:
 
         result["options"] = options
 
-        # ── Submit answer ──
+        # ── Submit answer to reveal correct one ──
         self.log("     Submitting answer...")
         try:
-            # Force remove 'inert' and click radio 1
             await self.page.evaluate("""() => {
                 const radios = document.querySelectorAll('input[type="radio"]');
                 radios.forEach(r => {
@@ -192,7 +192,6 @@ class MedofastScraper:
             }""")
             await asyncio.sleep(self.click_delay)
 
-            # Click confirm button
             btn = await self.page.query_selector("#show-b-btn")
             if btn:
                 await self.page.evaluate("btn => btn.click()", btn)
@@ -206,6 +205,8 @@ class MedofastScraper:
 
         if self.skip_explanation:
             self.log("     Skipping explanation.")
+            # Still wait a bit for potential AJAX answer reveal in UI
+            await asyncio.sleep(2)
         else:
             self.log("     Waiting for explanation...")
             try:
@@ -214,7 +215,7 @@ class MedofastScraper:
                         const block = document.getElementById('block-b');
                         if (!block) return false;
                         const text = block.innerText || '';
-                        return text.trim().length > 5;
+                        return text.trim().length > 3;
                     }""",
                     timeout=10000
                 )
@@ -234,61 +235,95 @@ class MedofastScraper:
                     except:
                         pass
 
-        # ── Identify correct options (Enhanced) ──
+        # ── Identify correct options (Exhaustive Search) ──
         correct_options = []
 
-        # Method 1: From answer text (e.g., "تایید گزینه 3", "تایید گزینه 4")
+        # Method 1: Text-based (Arabic/Persian digits support)
         if answer_text:
-            matches = re.findall(r'گزینه\s*(\d)', answer_text)
-            if matches:
-                correct_options.extend([int(m) for m in matches])
+            # Normalize digits
+            norm_text = answer_text.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789'))
+            patterns = [
+                r'پاسخ صحیح[:\s]*گزینه\s*(\d)',
+                r'تایید گزینه\s*(\d)',
+                r'گزینه\s*(\d)\s*صحیح است',
+                r'گزینه\s*(\d)'
+            ]
+            for p in patterns:
+                matches = re.findall(p, norm_text)
+                if matches:
+                    correct_options.extend([int(m) for m in matches])
 
-        # Method 2: Detailed Label and Icon Check
+        # Method 2: Comprehensive Visual DOM Inspection
         try:
-            for i in range(1, 5):
-                # Check label background and icons inside
-                label_data = await self.page.evaluate(f"""(id) => {{
-                    const el = document.getElementById(id);
-                    if (!el) return null;
-                    const style = window.getComputedStyle(el);
-                    const bg = style.backgroundColor;
-                    const border = style.borderColor;
-                    const text = el.innerText || '';
-                    const hasCheckIcon = el.querySelector('.fa-check, .fa-check-circle, .text-success') !== null;
-                    return {{ bg, border, text, hasCheckIcon, classes: el.className }};
-                }}""", f"label{i}")
+            visual_results = await self.page.evaluate("""() => {
+                const results = [];
+                for (let i = 1; i <= 4; i++) {
+                    const label = document.getElementById('label' + i);
+                    const bar = document.getElementById('prograssBar' + i);
+                    let isCorrect = false;
+                    let reason = "";
 
-                if label_data:
-                    bg = label_data['bg']
-                    cls = label_data['classes']
-                    # Look for green colors: rgb(34, 139, 34), rgb(40, 167, 69), etc.
-                    # Or 'success', 'correct' classes
-                    is_green = "rgb(40, 167, 69)" in bg or "rgb(34," in bg or "rgb(0, 128, 0)" in bg
-                    if is_green or "success" in cls or "correct" in cls or label_data['hasCheckIcon']:
-                        if i not in correct_options:
-                            correct_options.append(i)
-        except:
-            pass
+                    const checkElement = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const bg = style.backgroundColor;
+                        const rgb = bg.match(/\\d+/g);
+                        if (rgb && rgb.length >= 3) {
+                            const r = parseInt(rgb[0]), g = parseInt(rgb[1]), b = parseInt(rgb[2]);
+                            // Detect Green: G is dominant and reasonably high
+                            if (g > r + 30 && g > b + 30 && g > 100) return "green_bg";
+                        }
+                        if (el.className.includes('success') || el.className.includes('correct')) return "success_class";
+                        if (el.querySelector('.fa-check, .fa-check-circle, .text-success, .tick')) return "check_icon";
+                        return false;
+                    };
 
-        # Method 3: Progress bars (usually green for correct, red for incorrect)
-        try:
-            for i in range(1, 5):
-                bar_data = await self.page.evaluate(f"""(id) => {{
-                    const el = document.getElementById(id);
-                    if (!el) return null;
-                    const style = window.getComputedStyle(el);
-                    return {{ bg: style.backgroundColor, classes: el.className }};
-                }}""", f"prograssBar{i}")
+                    const labelReason = checkElement(label);
+                    const barReason = checkElement(bar);
 
-                if bar_data:
-                    if "bg-success" in bar_data['classes'] or "rgb(40, 167, 69)" in bar_data['bg']:
-                        if i not in correct_options:
-                            correct_options.append(i)
-        except:
-            pass
+                    if (labelReason || barReason) {
+                        results.push(i);
+                    }
+                }
+                return results;
+            }""")
+            if visual_results:
+                correct_options.extend(visual_results)
+        except Exception as e:
+            self.log(f"     ⚠️ Visual inspection failed: {str(e)}")
 
-        # De-duplicate and sort
+        # Final De-duplicate and sort
         correct_options = sorted(list(set(correct_options)))
+
+        # ── Debugging/Fallback if still failed ──
+        if not correct_options:
+            self.log(f"     ⚠️ No answer detected. Trying fallback to any green element...")
+            try:
+                # Find ANY element with 'success' or 'correct' in class that contains a number
+                any_correct = await self.page.evaluate("""() => {
+                    const all = document.querySelectorAll('.success, .correct, [class*="success"], [class*="correct"]');
+                    const found = [];
+                    all.forEach(el => {
+                        const text = el.innerText || '';
+                        const m = text.match(/[1-4]/);
+                        if (m) found.push(parseInt(m[0]));
+                        // Check parent labels too
+                        const label = el.closest('label');
+                        if (label && label.id && label.id.startsWith('label')) {
+                            found.push(parseInt(label.id.replace('label', '')));
+                        }
+                    });
+                    return found;
+                }""")
+                if any_correct:
+                    correct_options = sorted(list(set(any_correct)))
+            except:
+                pass
+
+        if not correct_options:
+            self.log(f"     ❌ Still no correct option detected. Screenshot saved.")
+            self.debug_dir.mkdir(exist_ok=True)
+            await self.page.screenshot(path=str(self.debug_dir / f"fail_q{question_number}.png"))
 
         result["correct_options"] = correct_options
         result["answer_explanation"] = answer_text.strip() if not self.skip_explanation else ""
@@ -305,7 +340,7 @@ class MedofastScraper:
         if "turned-off" in cls:
             return False
 
-        self.log(f"     Moving to next (from {current_number})...")
+        self.log(f"     Moving to next...")
         await asyncio.sleep(self.click_delay)
 
         try:
