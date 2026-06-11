@@ -42,26 +42,20 @@ class MedofastScraper:
             await self.page.wait_for_selector("#questionSkeletonLoader", state="hidden", timeout=15000)
         except:
             pass
-        # Hard delay to ensure site stabilizes after skeleton disappears
         await asyncio.sleep(self.question_load_delay)
 
     async def download_image(self, url):
         if not url: return None
-
-        # Handle relative URLs
         if url.startswith("/"):
             url = f"https://medofast.ir{url}"
 
         try:
             self.image_dir.mkdir(exist_ok=True)
-            # Create a safe filename
             filename = re.sub(r'[^\w\-_\. ]', '_', url.split("/")[-1])
             if not filename or len(filename) < 5:
                 filename = f"img_{hash(url)}.png"
 
             filepath = self.image_dir / filename
-
-            # If we already have it, don't download again
             if filepath.exists():
                 return str(filepath)
 
@@ -129,18 +123,15 @@ class MedofastScraper:
             q_elem = await self.page.query_selector("#qtxt")
             if q_elem:
                 question_text = await q_elem.inner_text()
-                # Find all images in the question content
                 for img in await q_elem.query_selector_all("img"):
                     src = await img.get_attribute("src")
                     alt = await img.get_attribute("alt") or ""
                     if src:
-                        self.log(f"     Found image: {src[:50]}...")
                         local_path = await self.download_image(src)
                         question_images.append({"src": src, "alt": alt, "local_path": local_path})
         except:
             pass
 
-        # Handle secondary question container if primary is empty
         if not question_text.strip():
             try:
                 q_elem = await self.page.query_selector(".qtext-before")
@@ -188,20 +179,25 @@ class MedofastScraper:
         # ── Submit answer ──
         self.log("     Submitting answer...")
         try:
-            await self.page.eval_on_selector(
-                'input[type="radio"][value="1"]',
-                "el => { let p = el.closest('[inert]'); if(p) p.removeAttribute('inert'); }"
-            )
-            radio = await self.page.query_selector('input[type="radio"][value="1"]')
-            if radio:
-                await radio.click(force=True)
+            # Force remove 'inert' and click radio 1
+            await self.page.evaluate("""() => {
+                const radios = document.querySelectorAll('input[type="radio"]');
+                radios.forEach(r => {
+                    let p = r.closest('[inert]');
+                    if (p) p.removeAttribute('inert');
+                    r.disabled = false;
+                });
+                const r1 = document.querySelector('input[type="radio"][value="1"]');
+                if (r1) r1.click();
+            }""")
             await asyncio.sleep(self.click_delay)
 
+            # Click confirm button
             btn = await self.page.query_selector("#show-b-btn")
             if btn:
                 await self.page.evaluate("btn => btn.click()", btn)
-        except:
-            pass
+        except Exception as e:
+            self.log(f"     ⚠️ Submit failed: {str(e)}")
 
         await asyncio.sleep(self.click_delay)
 
@@ -218,7 +214,7 @@ class MedofastScraper:
                         const block = document.getElementById('block-b');
                         if (!block) return false;
                         const text = block.innerText || '';
-                        return text.trim().length > 10;
+                        return text.trim().length > 5;
                     }""",
                     timeout=10000
                 )
@@ -226,7 +222,7 @@ class MedofastScraper:
                 if block:
                     answer_text = await block.inner_text()
             except:
-                for _ in range(3):
+                for _ in range(5):
                     await asyncio.sleep(self.answer_load_delay)
                     try:
                         block = await self.page.query_selector("#block-b")
@@ -238,44 +234,54 @@ class MedofastScraper:
                     except:
                         pass
 
-        # ── Identify correct options (Now supporting multiple) ──
+        # ── Identify correct options (Enhanced) ──
         correct_options = []
 
         # Method 1: From answer text (e.g., "تایید گزینه 3", "تایید گزینه 4")
         if answer_text:
-            matches = re.findall(r'تایید گزینه\s*(\d)', answer_text)
+            matches = re.findall(r'گزینه\s*(\d)', answer_text)
             if matches:
                 correct_options.extend([int(m) for m in matches])
 
-        # Method 2: Labels
+        # Method 2: Detailed Label and Icon Check
         try:
             for i in range(1, 5):
-                label = await self.page.query_selector(f"#label{i}")
-                if label:
-                    cls = await label.get_attribute("class") or ""
-                    style = await label.get_attribute("style") or ""
-                    bg = await self.page.evaluate(
-                        """(id) => {
-                            const el = document.getElementById(id);
-                            return el ? window.getComputedStyle(el).backgroundColor : '';
-                        }""",
-                        f"label{i}"
-                    )
-                    if ("success" in cls or "correct" in cls or
-                            "green" in style.lower() or
-                            "34" in bg or "40, 167, 69" in bg):
+                # Check label background and icons inside
+                label_data = await self.page.evaluate(f"""(id) => {{
+                    const el = document.getElementById(id);
+                    if (!el) return null;
+                    const style = window.getComputedStyle(el);
+                    const bg = style.backgroundColor;
+                    const border = style.borderColor;
+                    const text = el.innerText || '';
+                    const hasCheckIcon = el.querySelector('.fa-check, .fa-check-circle, .text-success') !== null;
+                    return {{ bg, border, text, hasCheckIcon, classes: el.className }};
+                }}""", f"label{i}")
+
+                if label_data:
+                    bg = label_data['bg']
+                    cls = label_data['classes']
+                    # Look for green colors: rgb(34, 139, 34), rgb(40, 167, 69), etc.
+                    # Or 'success', 'correct' classes
+                    is_green = "rgb(40, 167, 69)" in bg or "rgb(34," in bg or "rgb(0, 128, 0)" in bg
+                    if is_green or "success" in cls or "correct" in cls or label_data['hasCheckIcon']:
                         if i not in correct_options:
                             correct_options.append(i)
         except:
             pass
 
-        # Method 3: Progress bars
+        # Method 3: Progress bars (usually green for correct, red for incorrect)
         try:
             for i in range(1, 5):
-                bar = await self.page.query_selector(f"#prograssBar{i}")
-                if bar:
-                    cls = await bar.get_attribute("class") or ""
-                    if "bg-success" in cls:
+                bar_data = await self.page.evaluate(f"""(id) => {{
+                    const el = document.getElementById(id);
+                    if (!el) return null;
+                    const style = window.getComputedStyle(el);
+                    return {{ bg: style.backgroundColor, classes: el.className }};
+                }}""", f"prograssBar{i}")
+
+                if bar_data:
+                    if "bg-success" in bar_data['classes'] or "rgb(40, 167, 69)" in bar_data['bg']:
                         if i not in correct_options:
                             correct_options.append(i)
         except:
