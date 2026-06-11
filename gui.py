@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
+import csv
 import threading
 import asyncio
 import os
@@ -12,7 +13,7 @@ class MedofastGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Medofast Scraper Pro")
-        self.root.geometry("700x650")
+        self.root.geometry("800x700")
 
         self.scraper = None
         self.loop = None
@@ -23,8 +24,22 @@ class MedofastGUI:
         self.load_settings()
 
     def setup_ui(self):
-        # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
+        # Notebook for Tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Tab 1: Scraper
+        self.scraper_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.scraper_tab, text="Scraper")
+        self.setup_scraper_tab()
+
+        # Tab 2: Exporter
+        self.exporter_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.exporter_tab, text="Export JSON to CSV")
+        self.setup_exporter_tab()
+
+    def setup_scraper_tab(self):
+        main_frame = ttk.Frame(self.scraper_tab, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # URL Input
@@ -34,7 +49,7 @@ class MedofastGUI:
         self.url_entry.grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=5)
 
         # Output Path
-        ttk.Label(main_frame, text="Output Path:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Output Path (JSON):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.output_var = tk.StringVar(value="questions.json")
         self.output_entry = ttk.Entry(main_frame, textvariable=self.output_var, width=50)
         self.output_entry.grid(row=1, column=1, sticky=tk.W, pady=5)
@@ -104,6 +119,105 @@ class MedofastGUI:
         main_frame.rowconfigure(6, weight=1)
         main_frame.columnconfigure(1, weight=1)
 
+    def setup_exporter_tab(self):
+        export_frame = ttk.Frame(self.exporter_tab, padding="20")
+        export_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(export_frame, text="JSON Source File:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.json_source_var = tk.StringVar()
+        ttk.Entry(export_frame, textvariable=self.json_source_var, width=50).grid(row=0, column=1, pady=5)
+        ttk.Button(export_frame, text="Browse", command=self.browse_json_source).grid(row=0, column=2, padx=5)
+
+        ttk.Label(export_frame, text="CSV Output File:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.csv_dest_var = tk.StringVar()
+        ttk.Entry(export_frame, textvariable=self.csv_dest_var, width=50).grid(row=1, column=1, pady=5)
+        ttk.Button(export_frame, text="Browse", command=self.browse_csv_dest).grid(row=1, column=2, padx=5)
+
+        self.export_btn = ttk.Button(export_frame, text="Export to CSV", command=self.run_export)
+        self.export_btn.grid(row=2, column=0, columnspan=3, pady=20)
+
+        # Help text
+        help_text = "This tool converts your scraped JSON file into a CSV format.\nIt will include metadata, question text, options, correct answer, and explanation."
+        ttk.Label(export_frame, text=help_text, justify=tk.LEFT).grid(row=3, column=0, columnspan=3, pady=10)
+
+    def browse_json_source(self):
+        filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if filename:
+            self.json_source_var.set(filename)
+            if not self.csv_dest_var.get():
+                self.csv_dest_var.set(filename.replace(".json", ".csv"))
+
+    def browse_csv_dest(self):
+        filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if filename:
+            self.csv_dest_var.set(filename)
+
+    def run_export(self):
+        json_path = self.json_source_var.get()
+        csv_path = self.csv_dest_var.get()
+
+        if not json_path or not os.path.exists(json_path):
+            messagebox.showerror("Error", "Please select a valid JSON source file.")
+            return
+        if not csv_path:
+            messagebox.showerror("Error", "Please select a destination for the CSV file.")
+            return
+
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if not data:
+                messagebox.showwarning("Warning", "The JSON file is empty.")
+                return
+
+            # Determine headers from the first item
+            headers = [
+                "Question Number",
+                "Exam", "Date", "Lesson", "Subject", "Difficulty", "Success Rate", "Position",
+                "Question Text",
+                "Option 1", "Option 2", "Option 3", "Option 4",
+                "Correct Option", "Explanation"
+            ]
+
+            with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+
+                for q in data:
+                    meta = q.get("metadata", {})
+                    opts = q.get("options", [])
+
+                    # Flatten options
+                    opt_texts = ["", "", "", ""]
+                    for o in opts:
+                        idx = o.get("number", 1) - 1
+                        if 0 <= idx < 4:
+                            opt_texts[idx] = o.get("text", "")
+
+                    row = [
+                        q.get("question_number", ""),
+                        meta.get("آزمون", ""),
+                        meta.get("تاریخ", ""),
+                        meta.get("درس", ""),
+                        meta.get("موضوع", ""),
+                        meta.get("سطح دشواری", ""),
+                        meta.get("درصد پاسخ صحیح", ""),
+                        meta.get("موقعیت سوال", ""),
+                        q.get("question_text", ""),
+                        opt_texts[0],
+                        opt_texts[1],
+                        opt_texts[2],
+                        opt_texts[3],
+                        q.get("correct_option", ""),
+                        q.get("answer_explanation", "")
+                    ]
+                    writer.writerow(row)
+
+            messagebox.showinfo("Success", f"Successfully exported {len(data)} questions to CSV.")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
+
     def update_skip_explanation(self):
         if self.scraper:
             self.scraper.skip_explanation = self.skip_explanation_var.get()
@@ -113,7 +227,6 @@ class MedofastGUI:
         self.q_load_delay_label.config(text=f"{self.q_load_delay_var.get():.1f}s")
         self.a_load_delay_label.config(text=f"{self.a_load_delay_var.get():.1f}s")
 
-        # Update scraper settings on the fly if running
         if self.scraper:
             self.scraper.click_delay = self.click_delay_var.get()
             self.scraper.question_load_delay = self.q_load_delay_var.get()
