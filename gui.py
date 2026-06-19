@@ -13,7 +13,7 @@ class MedofastGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Medofast Scraper Pro")
-        self.root.geometry("800x700")
+        self.root.geometry("850x750")
 
         self.scraper = None
         self.loop = None
@@ -24,16 +24,13 @@ class MedofastGUI:
         self.load_settings()
 
     def setup_ui(self):
-        # Notebook for Tabs
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Tab 1: Scraper
         self.scraper_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.scraper_tab, text="Scraper")
         self.setup_scraper_tab()
 
-        # Tab 2: Exporter
         self.exporter_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.exporter_tab, text="Export JSON to CSV")
         self.setup_exporter_tab()
@@ -42,56 +39,56 @@ class MedofastGUI:
         main_frame = ttk.Frame(self.scraper_tab, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # URL Input
         ttk.Label(main_frame, text="Start URL:").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(main_frame, textvariable=self.url_var, width=60)
         self.url_entry.grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=5)
 
-        # Output Path
         ttk.Label(main_frame, text="Output Path (JSON):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.output_var = tk.StringVar(value="questions.json")
         self.output_entry = ttk.Entry(main_frame, textvariable=self.output_var, width=50)
         self.output_entry.grid(row=1, column=1, sticky=tk.W, pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_output).grid(row=1, column=2, sticky=tk.W, padx=5)
 
-        # Delays / Speed Control
         delay_frame = ttk.LabelFrame(main_frame, text="Speed & Delay Settings (seconds)", padding="10")
         delay_frame.grid(row=2, column=0, columnspan=3, sticky=tk.EW, pady=10)
 
-        # Click Delay
         ttk.Label(delay_frame, text="Click Delay:").grid(row=0, column=0, sticky=tk.W)
-        self.click_delay_var = tk.DoubleVar(value=1.0)
+        self.click_delay_var = tk.DoubleVar(value=2.0)
         self.click_delay_scale = ttk.Scale(delay_frame, from_=0.1, to=10.0, variable=self.click_delay_var, orient=tk.HORIZONTAL, length=300, command=lambda x: self.update_delay_labels())
         self.click_delay_scale.grid(row=0, column=1, padx=10)
-        self.click_delay_label = ttk.Label(delay_frame, text="1.0s")
+        self.click_delay_label = ttk.Label(delay_frame, text="2.0s")
         self.click_delay_label.grid(row=0, column=2)
 
-        # Question Load Delay
         ttk.Label(delay_frame, text="Question Load Delay:").grid(row=1, column=0, sticky=tk.W)
-        self.q_load_delay_var = tk.DoubleVar(value=2.0)
+        self.q_load_delay_var = tk.DoubleVar(value=3.0)
         self.q_load_delay_scale = ttk.Scale(delay_frame, from_=0.5, to=15.0, variable=self.q_load_delay_var, orient=tk.HORIZONTAL, length=300, command=lambda x: self.update_delay_labels())
         self.q_load_delay_scale.grid(row=1, column=1, padx=10)
-        self.q_load_delay_label = ttk.Label(delay_frame, text="2.0s")
+        self.q_load_delay_label = ttk.Label(delay_frame, text="3.0s")
         self.q_load_delay_label.grid(row=1, column=2)
 
-        # Answer Load Delay
         ttk.Label(delay_frame, text="Answer Load Delay:").grid(row=2, column=0, sticky=tk.W)
-        self.a_load_delay_var = tk.DoubleVar(value=1.0)
+        self.a_load_delay_var = tk.DoubleVar(value=2.0)
         self.a_load_delay_scale = ttk.Scale(delay_frame, from_=0.1, to=10.0, variable=self.a_load_delay_var, orient=tk.HORIZONTAL, length=300, command=lambda x: self.update_delay_labels())
         self.a_load_delay_scale.grid(row=2, column=1, padx=10)
-        self.a_load_delay_label = ttk.Label(delay_frame, text="1.0s")
+        self.a_load_delay_label = ttk.Label(delay_frame, text="2.0s")
         self.a_load_delay_label.grid(row=2, column=2)
 
-        # Options
-        options_frame = ttk.Frame(main_frame)
+        options_frame = ttk.LabelFrame(main_frame, text="Options", padding="10")
         options_frame.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=5)
 
         self.skip_explanation_var = tk.BooleanVar(value=False)
-        self.skip_explanation_check = ttk.Checkbutton(options_frame, text="Skip Explanatory Answers (Faster)", variable=self.skip_explanation_var, command=self.update_skip_explanation)
-        self.skip_explanation_check.pack(side=tk.LEFT)
+        self.skip_explanation_check = ttk.Checkbutton(options_frame, text="Skip Explanatory Answers (Faster)", variable=self.skip_explanation_var, command=self.update_scraper_params)
+        self.skip_explanation_check.grid(row=0, column=0, sticky=tk.W, padx=5)
 
-        # Controls
+        self.save_screenshots_var = tk.BooleanVar(value=False)
+        self.save_screenshots_check = ttk.Checkbutton(options_frame, text="Save Screenshots for each question", variable=self.save_screenshots_var, command=self.update_scraper_params)
+        self.save_screenshots_check.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        self.save_html_var = tk.BooleanVar(value=False)
+        self.save_html_check = ttk.Checkbutton(options_frame, text="Save HTML Source for each question", variable=self.save_html_var, command=self.update_scraper_params)
+        self.save_html_check.grid(row=0, column=2, sticky=tk.W, padx=5)
+
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=4, column=0, columnspan=3, pady=10)
 
@@ -107,7 +104,6 @@ class MedofastGUI:
         self.stop_btn = ttk.Button(control_frame, text="Stop", command=self.stop_scraper, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        # Log Area
         ttk.Label(main_frame, text="Logs:").grid(row=5, column=0, sticky=tk.W, pady=(10, 0))
         self.log_text = tk.Text(main_frame, height=15, width=80, state=tk.DISABLED)
         self.log_text.grid(row=6, column=0, columnspan=3, sticky=tk.NSEW, pady=5)
@@ -136,8 +132,7 @@ class MedofastGUI:
         self.export_btn = ttk.Button(export_frame, text="Export to CSV", command=self.run_export)
         self.export_btn.grid(row=2, column=0, columnspan=3, pady=20)
 
-        # Help text
-        help_text = "This tool converts your scraped JSON file into a CSV format.\nIt will include metadata, question text, options, correct answer, and explanation."
+        help_text = "This tool converts your scraped JSON file into a CSV format.\nIt will include metadata, question text, options, correct options, and explanation."
         ttk.Label(export_frame, text=help_text, justify=tk.LEFT).grid(row=3, column=0, columnspan=3, pady=10)
 
     def browse_json_source(self):
@@ -171,7 +166,6 @@ class MedofastGUI:
                 messagebox.showwarning("Warning", "The JSON file is empty.")
                 return
 
-            # Determine headers from the first item
             headers = [
                 "Question Number",
                 "Exam", "Date", "Lesson", "Subject", "Difficulty", "Success Rate", "Position",
@@ -187,8 +181,6 @@ class MedofastGUI:
                 for q in data:
                     meta = q.get("metadata", {})
                     opts = q.get("options", [])
-
-                    # Flatten options
                     opt_texts = ["", "", "", ""]
                     for o in opts:
                         idx = o.get("number", 1) - 1
@@ -198,7 +190,6 @@ class MedofastGUI:
                     corrects = q.get("correct_options", [])
                     if not corrects and q.get("correct_option"):
                         corrects = [q.get("correct_option")]
-
                     corrects_str = ", ".join(map(str, corrects))
 
                     row = [
@@ -224,9 +215,11 @@ class MedofastGUI:
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
 
-    def update_skip_explanation(self):
+    def update_scraper_params(self):
         if self.scraper:
             self.scraper.skip_explanation = self.skip_explanation_var.get()
+            self.scraper.save_screenshots = self.save_screenshots_var.get()
+            self.scraper.save_html = self.save_html_var.get()
 
     def update_delay_labels(self):
         self.click_delay_label.config(text=f"{self.click_delay_var.get():.1f}s")
@@ -256,10 +249,12 @@ class MedofastGUI:
                     settings = json.load(f)
                     self.url_var.set(settings.get("url", ""))
                     self.output_var.set(settings.get("output", "questions.json"))
-                    self.click_delay_var.set(settings.get("click_delay", 1.0))
-                    self.q_load_delay_var.set(settings.get("q_load_delay", 2.0))
-                    self.a_load_delay_var.set(settings.get("a_load_delay", 1.0))
+                    self.click_delay_var.set(settings.get("click_delay", 2.0))
+                    self.q_load_delay_var.set(settings.get("q_load_delay", 3.0))
+                    self.a_load_delay_var.set(settings.get("a_load_delay", 2.0))
                     self.skip_explanation_var.set(settings.get("skip_explanation", False))
+                    self.save_screenshots_var.set(settings.get("save_screenshots", False))
+                    self.save_html_var.set(settings.get("save_html", False))
                     self.update_delay_labels()
             except Exception as e:
                 print(f"Failed to load settings: {e}")
@@ -271,7 +266,9 @@ class MedofastGUI:
             "click_delay": self.click_delay_var.get(),
             "q_load_delay": self.q_load_delay_var.get(),
             "a_load_delay": self.a_load_delay_var.get(),
-            "skip_explanation": self.skip_explanation_var.get()
+            "skip_explanation": self.skip_explanation_var.get(),
+            "save_screenshots": self.save_screenshots_var.get(),
+            "save_html": self.save_html_var.get()
         }
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(settings, f)
@@ -294,6 +291,8 @@ class MedofastGUI:
         self.scraper.question_load_delay = self.q_load_delay_var.get()
         self.scraper.answer_load_delay = self.a_load_delay_var.get()
         self.scraper.skip_explanation = self.skip_explanation_var.get()
+        self.scraper.save_screenshots = self.save_screenshots_var.get()
+        self.scraper.save_html = self.save_html_var.get()
 
         self.scraper_thread = threading.Thread(target=self.run_async_scraper, daemon=True)
         self.scraper_thread.start()

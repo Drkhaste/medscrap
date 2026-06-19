@@ -22,12 +22,16 @@ class MedofastScraper:
         self.question_load_delay = 3.0
         self.answer_load_delay = 2.0
         self.skip_explanation = False
+        self.save_screenshots = False
+        self.save_html = False
 
         self.browser = None
         self.context = None
         self.page = None
         self.image_dir = Path("downloaded_images")
         self.debug_dir = Path("debug_screenshots")
+        self.screenshots_dir = Path("screenshots")
+        self.html_dir = Path("html_source")
 
     def log(self, message):
         if self.logger:
@@ -206,7 +210,6 @@ class MedofastScraper:
 
         if self.skip_explanation:
             self.log("     Skipping explanation wait.")
-            # Quick check if it already appeared
             try:
                 block = await self.page.query_selector("#block-b")
                 if block and await block.is_visible():
@@ -227,7 +230,6 @@ class MedofastScraper:
                 block = await self.page.query_selector("#block-b")
                 if block:
                     answer_text = await block.inner_text()
-                    # Also extract images from explanation
                     for img in await block.query_selector_all("img"):
                         src = await img.get_attribute("src")
                         alt = await img.get_attribute("alt") or ""
@@ -247,10 +249,8 @@ class MedofastScraper:
                     except:
                         pass
 
-        # ── Identify correct options (Exhaustive Search) ──
+        # ── Identify correct options ──
         correct_options = []
-
-        # Method 1: Text-based (Arabic/Persian digits support)
         if answer_text:
             norm_text = answer_text.translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789'))
             patterns = [
@@ -264,14 +264,12 @@ class MedofastScraper:
                 if matches:
                     correct_options.extend([int(m) for m in matches])
 
-        # Method 2: Comprehensive Visual DOM Inspection (Green and Blue)
         try:
             visual_results = await self.page.evaluate("""() => {
                 const results = [];
                 for (let i = 1; i <= 4; i++) {
                     const label = document.getElementById('label' + i);
                     const bar = document.getElementById('prograssBar' + i);
-
                     const checkElement = (el) => {
                         if (!el) return false;
                         const style = window.getComputedStyle(el);
@@ -279,25 +277,15 @@ class MedofastScraper:
                         const rgb = bg.match(/\\d+/g);
                         if (rgb && rgb.length >= 3) {
                             const r = parseInt(rgb[0]), g = parseInt(rgb[1]), b = parseInt(rgb[2]);
-
-                            // Detect Green: G is dominant
                             if (g > r + 30 && g > b + 30 && g > 100) return true;
-
-                            // Detect Blue (Medofast uses blue for correct answer in some views)
-                            // Blue: B is dominant
                             if (b > r + 30 && b > g + 30 && b > 100) return true;
                         }
-
                         if (el.className.includes('success') || el.className.includes('correct') || el.className.includes('primary')) {
-                             // But not 'danger' or 'error'
                              if (!el.className.includes('danger') && !el.className.includes('error')) return true;
                         }
-
                         if (el.querySelector('.fa-check, .fa-check-circle, .text-success, .text-primary, .tick')) return true;
-
                         return false;
                     };
-
                     if (checkElement(label) || checkElement(bar)) {
                         results.push(i);
                     }
@@ -309,16 +297,13 @@ class MedofastScraper:
         except Exception as e:
             self.log(f"     ⚠️ Visual inspection failed: {str(e)}")
 
-        # Final De-duplicate and sort
         correct_options = sorted(list(set(correct_options)))
 
-        # ── Debugging/Fallback if still failed ──
         if not correct_options:
             self.log(f"     ⚠️ No answer detected. Trying final fallback...")
             try:
                 any_correct = await self.page.evaluate("""() => {
                     const found = [];
-                    // Look for progress bars that are NOT red
                     for (let i = 1; i <= 4; i++) {
                         const bar = document.getElementById('prograssBar' + i);
                         if (bar) {
@@ -326,7 +311,6 @@ class MedofastScraper:
                             const rgb = bg.match(/\\d+/g);
                             if (rgb && rgb.length >= 3) {
                                 const r = parseInt(rgb[0]), g = parseInt(rgb[1]), b = parseInt(rgb[2]);
-                                // If it's more blue or green than red, it might be the one
                                 if ((b > r || g > r) && (b > 100 || g > 100)) found.push(i);
                             }
                         }
@@ -342,6 +326,21 @@ class MedofastScraper:
             self.log(f"     ❌ Still no correct option detected. Screenshot saved.")
             self.debug_dir.mkdir(exist_ok=True)
             await self.page.screenshot(path=str(self.debug_dir / f"fail_q{question_number}.png"))
+
+        # ── Optional: Save Full Question Screenshot & HTML ──
+        if self.save_screenshots:
+            self.screenshots_dir.mkdir(exist_ok=True)
+            path = self.screenshots_dir / f"question_{question_number}.png"
+            await self.page.screenshot(path=str(path), full_page=True)
+            result["screenshot_path"] = str(path)
+
+        if self.save_html:
+            self.html_dir.mkdir(exist_ok=True)
+            path = self.html_dir / f"question_{question_number}.html"
+            content = await self.page.content()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            result["html_path"] = str(path)
 
         result["correct_options"] = correct_options
         result["answer_explanation"] = answer_text.strip() if not self.skip_explanation else ""
