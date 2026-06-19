@@ -4,11 +4,12 @@ import json
 import re
 import os
 import aiohttp
+import csv
 from pathlib import Path
 from playwright.async_api import async_playwright
 
 class MedofastScraper:
-    def __init__(self, logger_callback=None):
+    def __init__(self, logger_callback=None, session_path="session.json"):
         self.logger = logger_callback
         self.is_paused = False
         self.is_stopped = False
@@ -18,6 +19,8 @@ class MedofastScraper:
         # Settings
         self.url = ""
         self.output_path = "questions.json"
+        self.csv_output_path = "questions.csv"
+        self.session_path = session_path
         self.click_delay = 2.0
         self.question_load_delay = 3.0
         self.answer_load_delay = 2.0
@@ -32,6 +35,13 @@ class MedofastScraper:
         self.debug_dir = Path("debug_screenshots")
         self.screenshots_dir = Path("screenshots")
         self.html_dir = Path("html_source")
+
+    def set_dirs(self, base_path):
+        base = Path(base_path)
+        self.image_dir = base / "downloaded_images"
+        self.debug_dir = base / "debug_screenshots"
+        self.screenshots_dir = base / "screenshots"
+        self.html_dir = base / "html_source"
 
     def log(self, message):
         if self.logger:
@@ -55,7 +65,7 @@ class MedofastScraper:
             url = f"https://medofast.ir{url}"
 
         try:
-            self.image_dir.mkdir(exist_ok=True)
+            self.image_dir.mkdir(parents=True, exist_ok=True)
             filename = re.sub(r'[^\w\-_\. ]', '_', url.split("/")[-1])
             if not filename or len(filename) < 5:
                 filename = f"img_{hash(url)}.png"
@@ -400,35 +410,140 @@ class MedofastScraper:
 
         return True
 
-    async def run(self, login_confirmed_event):
+    def save_data(self, all_questions):
+        # Save JSON
+        with open(self.output_path, 'w', encoding='utf-8') as f:
+            json.dump(all_questions, f, ensure_ascii=False, indent=2)
+
+        # Save CSV
+        headers = [
+            "Question Number",
+            "Exam", "Date", "Lesson", "Subject", "Difficulty", "Success Rate", "Position",
+            "Question Text",
+            "Option 1", "Option 2", "Option 3", "Option 4",
+            "Correct Options", "Explanation"
+        ]
+        try:
+            with open(self.csv_output_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for q in all_questions:
+                    meta = q.get("metadata", {})
+                    opts = q.get("options", [])
+                    opt_texts = ["", "", "", ""]
+                    for o in opts:
+                        idx = o.get("number", 1) - 1
+                        if 0 <= idx < 4:
+                            opt_texts[idx] = o.get("text", "")
+
+                    corrects = q.get("correct_options", [])
+                    corrects_str = ", ".join(map(str, corrects))
+
+                    row = [
+                        q.get("question_number", ""),
+                        meta.get("آزمون", ""),
+                        meta.get("تاریخ", ""),
+                        meta.get("درس", ""),
+                        meta.get("موضوع", ""),
+                        meta.get("سطح دشواری", ""),
+                        meta.get("درصد پاسخ صحیح", ""),
+                        meta.get("موقعیت سوال", ""),
+                        q.get("question_text", ""),
+                        opt_texts[0],
+                        opt_texts[1],
+                        opt_texts[2],
+                        opt_texts[3],
+                        corrects_str,
+                        q.get("answer_explanation", "")
+                    ]
+                    writer.writerow(row)
+        except Exception as e:
+            self.log(f"     ⚠️ CSV save failed: {str(e)}")
+
+    async def login_headless(self):
+        self.log("📱 Headless Login Started...")
+        await self.page.goto("https://medofast.ir/login", wait_until="networkidle", timeout=30000)
+
+        # Phone number input
+        try:
+            phone_input = await self.page.wait_for_selector('input[placeholder*="۰۹۱۲۳۴۵۶۷۸۹"]', timeout=10000)
+        except:
+            phone_input = await self.page.wait_for_selector('input[type="tel"], input[name*="phone"], .form-control', timeout=5000)
+
+        phone_number = input("Enter your phone number (e.g. 09123456789): ")
+        await phone_input.fill(phone_number)
+
+        # Click "ارسال کد"
+        submit_btn = await self.page.get_by_text("ارسال کد").first
+        await submit_btn.click()
+        self.log("✅ OTP code sent. Waiting for 4-digit input...")
+
+        # Wait for OTP fields (often 4 separate inputs or one with maxlength)
+        await asyncio.sleep(2)
+        otp = input("Enter the 4-digit OTP: ")
+
+        # Try to fill 4 separate inputs if they exist
+        otp_inputs = await self.page.query_selector_all('input[maxlength="1"]')
+        if len(otp_inputs) >= 4:
+            for i in range(min(len(otp), len(otp_inputs))):
+                await otp_inputs[i].fill(otp[i])
+        else:
+            # Fallback to whatever input is visible for the code
+            code_input = await self.page.query_selector('input[name*="code"], input[name*="otp"]')
+            if code_input:
+                await code_input.fill(otp)
+
+        self.log("⏳ Verifying OTP...")
+        try:
+            await self.page.wait_for_url(lambda url: "login" not in url.lower(), timeout=15000)
+            self.log("✅ Login successful!")
+            await self.context.storage_state(path=self.session_path)
+            return True
+        except:
+            self.log("❌ Login failed or timed out.")
+            return False
+
+    async def run(self, headless=False):
         async with async_playwright() as p:
-            self.browser = await p.chromium.launch(headless=False)
-            self.context = await self.browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-            )
+            self.browser = await p.chromium.launch(headless=headless)
+
+            # Load session if exists
+            context_args = {
+                "viewport": {"width": 1280, "height": 900},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            }
+            if os.path.exists(self.session_path):
+                context_args["storage_state"] = self.session_path
+                self.log(f"📂 Session loaded from {self.session_path}")
+
+            self.context = await self.browser.new_context(**context_args)
             self.page = await self.context.new_page()
 
-            self.log("🌐 Opening login page...")
-            await self.page.goto("https://medofast.ir/login", wait_until="networkidle", timeout=30000)
+            # Check if we need to login
+            await self.page.goto(self.url if self.url else "https://medofast.ir/", wait_until="networkidle", timeout=30000)
 
-            self.log(f"⏳ Waiting for login confirmation...")
-            while not login_confirmed_event.is_set():
-                if self.is_stopped:
-                    await self.browser.close()
-                    return
-                try:
-                    await asyncio.wait_for(login_confirmed_event.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-
-            self.log("🌐 Navigating to URL...")
-            await self.page.goto(self.url, wait_until="networkidle", timeout=30000)
-            await self.wait_for_question_load()
-
-            logged_in_mode = await self.page.evaluate(
-                "() => document.body.getAttribute('data-user-authenticated') === 'true'"
+            is_logged_in = await self.page.evaluate(
+                "() => document.body.getAttribute('data-user-authenticated') === 'true' || !!document.querySelector('.fa-user-circle')"
             )
+
+            if not is_logged_in:
+                self.log("⚠️ Not logged in.")
+                if headless:
+                    success = await self.login_headless()
+                    if not success:
+                        await self.browser.close()
+                        return
+                else:
+                    self.log("⏳ Please login in the browser window...")
+                    # For GUI mode, we wait for a manual confirmation (this might need refactoring to match how GUI calls it)
+                    # For simplicity, we can just wait for navigation away from login
+                    while "login" in self.page.url:
+                        await asyncio.sleep(1)
+                    await self.context.storage_state(path=self.session_path)
+
+            if self.url:
+                await self.page.goto(self.url, wait_until="networkidle", timeout=30000)
+                await self.wait_for_question_load()
 
             total_questions = None
             try:
@@ -457,18 +572,17 @@ class MedofastScraper:
                 self.log(f"     Correct Options: {corrects if corrects else '⚠️ Not Found'}")
                 all_questions.append(data)
 
-                with open(self.output_path, 'w', encoding='utf-8') as f:
-                    json.dump(all_questions, f, ensure_ascii=False, indent=2)
+                self.save_data(all_questions)
 
                 if total_questions and question_number >= total_questions:
                     self.log("✅ Reached last question.")
                     break
 
                 await self.check_pause()
-                success = await self.go_to_next(question_number, logged_in_mode)
+                success = await self.go_to_next(question_number, True) # Assume logged in
                 if not success:
                     await asyncio.sleep(4)
-                    success = await self.go_to_next(question_number, logged_in_mode)
+                    success = await self.go_to_next(question_number, True)
 
                 if not success:
                     consecutive_failures += 1
